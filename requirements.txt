@@ -1,0 +1,4 @@
+pymupdf>=1.25
+anthropic>=1.0
+flask>=3.0
+pytest>=8.0

@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF-Translater</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2330; --muted:#667085; --accent:#2f5bea; --border:#dde1e8; --err:#b42318; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171c; --card:#1d2129; --text:#e6e8ec; --muted:#9aa3b2; --accent:#6d8dff; --border:#2e3440; --err:#ff8a80; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, sans-serif; }
+  main { max-width:640px; margin:48px auto; padding:0 16px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  p.lead { color:var(--muted); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:24px; }
+  label { display:block; font-weight:600; margin:16px 0 6px; }
+  select, input[type=file] { width:100%; padding:8px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  #drop { border:2px dashed var(--border); border-radius:10px; padding:28px; text-align:center; color:var(--muted); cursor:pointer; }
+  #drop.over { border-color:var(--accent); color:var(--accent); }
+  button { margin-top:20px; width:100%; padding:12px; border:0; border-radius:8px; background:var(--accent); color:#fff; font-size:15px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  .bar { height:8px; background:var(--border); border-radius:4px; overflow:hidden; margin-top:8px; }
+  .bar > div { height:100%; width:0; background:var(--accent); transition:width .3s; }
+  #status { margin-top:20px; display:none; }
+  #result a { display:inline-block; margin:12px 12px 0 0; color:var(--accent); font-weight:600; }
+  .err { color:var(--err); }
+  details { margin-top:12px; color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>PDF-Translater</h1>
+  <p class="lead">Text wird absatzweise im Kontext übersetzt und an derselben Stelle eingesetzt. Bilder und Layout bleiben erhalten.</p>
+  <form class="card" id="form">
+    <div id="drop">PDF hierher ziehen oder klicken<input type="file" id="pdf" name="pdf" accept="application/pdf" hidden></div>
+    <div class="row">
+      <div><label for="source">Von</label>
+        <select id="source" name="source">{% for l in languages %}<option {% if l == "English" %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+      <div><label for="target">Nach</label>
+        <select id="target" name="target">{% for l in languages %}<option {% if l == "German" %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+    </div>
+    <div class="row">
+      <div><label for="backend">Backend</label>
+        <select id="backend" name="backend"><option value="claude">Claude (kontextbewusst)</option><option value="pseudo">Pseudo (Layout-Test, offline)</option></select></div>
+      <div><label for="effort">Gründlichkeit</label>
+        <select id="effort" name="effort"><option value="medium">mittel</option><option value="high" selected>hoch</option><option value="xhigh">sehr hoch</option></select></div>
+    </div>
+    <button id="go" type="submit" disabled>Übersetzen</button>
+    <div id="status">
+      <div id="phase">…</div>
+      <div class="bar"><div id="fill"></div></div>
+      <div id="result"></div>
+    </div>
+  </form>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = t => String(t).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]);
+const drop = $("drop"), input = $("pdf");
+function setFile(f) { if (!f) return; const dt = new DataTransfer(); dt.items.add(f); input.files = dt.files; drop.textContent = f.name; $("go").disabled = false; }
+drop.onclick = () => input.click();
+input.onchange = () => setFile(input.files[0]);
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); setFile(e.dataTransfer.files[0]); };
+
+$("form").onsubmit = async e => {
+  e.preventDefault();
+  const fd = new FormData($("form")); fd.set("pdf", input.files[0]);
+  $("go").disabled = true; $("status").style.display = "block"; $("result").innerHTML = "";
+  const r = await fetch("/translate", { method: "POST", body: fd });
+  const data = await r.json();
+  if (!r.ok) { $("result").innerHTML = `<p class="err">${esc(data.error)}</p>`; $("go").disabled = false; return; }
+  poll(data.job_id);
+};
+
+async function poll(id) {
+  const s = await (await fetch(`/status/${id}`)).json();
+  $("phase").textContent = `${s.phase} – ${Math.round(s.progress * 100)} %`;
+  $("fill").style.width = `${s.progress * 100}%`;
+  if (s.status === "running") return setTimeout(() => poll(id), 1000);
+  $("go").disabled = false;
+  if (s.status === "error") { $("result").innerHTML = `<p class="err">Fehler: ${esc(s.error)}</p>`; return; }
+  $("phase").textContent = s.summary; $("fill").style.width = "100%";
+  let html = `<a href="/download/${id}?view=1" target="_blank">Ansehen</a><a href="/download/${id}">Herunterladen</a>`;
+  if (s.warnings.length) html += `<details><summary>${s.warnings.length} Hinweise</summary><ul>${s.warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul></details>`;
+  $("result").innerHTML = html;
+}
+</script>
+</body>
+</html>
