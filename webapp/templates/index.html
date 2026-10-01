@@ -16,7 +16,7 @@
   p.lead { color:var(--muted); margin:0 0 24px; }
   .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:24px; }
   label { display:block; font-weight:600; margin:16px 0 6px; }
-  select, input[type=file] { width:100%; padding:8px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); }
+  select, input[type=file], input[list] { width:100%; padding:8px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); }
   .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
   #drop { border:2px dashed var(--border); border-radius:10px; padding:28px; text-align:center; color:var(--muted); cursor:pointer; }
   #drop.over { border-color:var(--accent); color:var(--accent); }
@@ -33,7 +33,8 @@
 <body>
 <main>
   <h1>PDF-Translater</h1>
-  <p class="lead">Text wird absatzweise im Kontext übersetzt und an derselben Stelle eingesetzt. Bilder und Layout bleiben erhalten.</p>
+  <p class="lead">Text wird absatzweise im Kontext übersetzt und an derselben Stelle eingesetzt. Bilder und Layout bleiben erhalten. Alles läuft lokal auf diesem Rechner.</p>
+  <p class="lead" id="ollamahint" style="display:none">Hinweis: Ollama wurde nicht gefunden. Installiere es von ollama.com und lade ein Modell, z. B. <code>ollama pull {{ default_model }}</code>, oder wähle „Argos Translate“.</p>
   <form class="card" id="form">
     <div id="drop">PDF hierher ziehen oder klicken<input type="file" id="pdf" name="pdf" accept="application/pdf" hidden></div>
     <div class="row">
@@ -44,9 +45,13 @@
     </div>
     <div class="row">
       <div><label for="backend">Backend</label>
-        <select id="backend" name="backend"><option value="claude">Claude (kontextbewusst)</option><option value="pseudo">Pseudo (Layout-Test, offline)</option></select></div>
-      <div><label for="effort">Gründlichkeit</label>
-        <select id="effort" name="effort"><option value="medium">mittel</option><option value="high" selected>hoch</option><option value="xhigh">sehr hoch</option></select></div>
+        <select id="backend" name="backend">
+          <option value="ollama">Lokales Sprachmodell (Ollama)</option>
+          <option value="argos">Argos Translate (leicht, offline)</option>
+          <option value="pseudo">Pseudo (nur Layout-Test)</option>
+        </select></div>
+      <div id="modelbox"><label for="model">Modell</label>
+        <input id="model" name="model" list="models" value="{{ default_model }}"><datalist id="models"></datalist></div>
     </div>
     <button id="go" type="submit" disabled>Übersetzen</button>
     <div id="status">
@@ -66,6 +71,13 @@ input.onchange = () => setFile(input.files[0]);
 drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
 drop.ondragleave = () => drop.classList.remove("over");
 drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); setFile(e.dataTransfer.files[0]); };
+
+$("backend").onchange = () => { $("modelbox").style.visibility = $("backend").value === "ollama" ? "visible" : "hidden"; };
+fetch("/models").then(r => r.json()).then(d => {
+  $("models").innerHTML = d.models.map(m => `<option value="${esc(m)}">`).join("");
+  if (!d.models.length) $("ollamahint").style.display = "block";
+  else if (!d.models.includes($("model").value)) $("model").value = d.models[0];
+});
 
 $("form").onsubmit = async e => {
   e.preventDefault();

@@ -17,6 +17,8 @@ from werkzeug.utils import secure_filename
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from pdf_translator import get_translator, lang_suffix, translate_pdf  # noqa: E402
+from pdf_translator.translators import BACKENDS  # noqa: E402
+from pdf_translator.translators.ollama import DEFAULT_MODEL, OllamaTranslator  # noqa: E402
 
 LANGUAGES = ["German", "English", "French", "Spanish", "Italian", "Portuguese", "Dutch",
              "Polish", "Czech", "Swedish", "Turkish", "Russian", "Ukrainian", "Chinese", "Japanese", "Korean"]
@@ -30,27 +32,39 @@ os.makedirs(WORK_DIR, exist_ok=True)
 jobs: dict[str, dict] = {}
 
 
-def _run(job_id: str, src: str, dst: str, backend: str, source: str, target: str, effort: str) -> None:
+def _run(job_id: str, src: str, dst: str, backend: str, source: str, target: str, model: str) -> None:
     job = jobs[job_id]
 
     def progress(phase: str, frac: float) -> None:
         job.update(phase=phase, progress=frac)
 
     try:
-        kwargs = {"effort": effort} if backend == "claude" else {}
+        kwargs = {"model": model} if backend == "ollama" and model else {}
         translator = get_translator(backend, source, target, **kwargs)
         result = translate_pdf(src, dst, translator, cache_path=CACHE_PATH, progress=progress)
         job.update(status="done", warnings=result.warnings,
                    summary=f"{result.blocks_translated}/{result.blocks_total} Textblöcke übersetzt "
                            f"({result.blocks_from_cache} aus dem Cache)")
-    except Exception as exc:  # Fehler im Browser anzeigen
+    except RuntimeError as exc:  # erwartete Fehler (Ollama/Modell fehlt): im Browser anzeigen
+        job.update(status="error", error=str(exc))
+    except Exception as exc:
         traceback.print_exc()
         job.update(status="error", error=str(exc))
 
 
 @app.get("/")
 def index():
-    return render_template("index.html", languages=LANGUAGES)
+    return render_template("index.html", languages=LANGUAGES, default_model=DEFAULT_MODEL)
+
+
+@app.get("/models")
+def models():
+    """Lokal in Ollama installierte Modelle (leer, wenn Ollama nicht läuft)."""
+    try:
+        tags = OllamaTranslator("English", "German", timeout=3)._request("/api/tags")
+        return jsonify(models=sorted(m["name"] for m in tags.get("models", [])))
+    except RuntimeError:
+        return jsonify(models=[])
 
 
 @app.post("/translate")
@@ -66,8 +80,11 @@ def translate():
     file.save(src)
     jobs[job_id] = {"status": "running", "phase": "Warteschlange", "progress": 0.0,
                     "output": dst, "download_name": os.path.basename(dst).split("_", 1)[1]}
-    args = (job_id, src, dst, request.form.get("backend", "claude"), request.form.get("source", "English"),
-            target, request.form.get("effort", "high"))
+    backend = request.form.get("backend", "ollama")
+    if backend not in BACKENDS:
+        return jsonify(error="Unbekanntes Backend."), 400
+    args = (job_id, src, dst, backend, request.form.get("source", "English"),
+            target, request.form.get("model", "").strip())
     threading.Thread(target=_run, args=args, daemon=True).start()
     return jsonify(job_id=job_id)
 

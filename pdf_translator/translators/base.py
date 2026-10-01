@@ -25,11 +25,13 @@ class BatchRequest:
 class Translator(ABC):
     """Ein Backend übersetzt Stapel von Absätzen und sieht dabei den Kontext.
 
-    Eigene Backends (DeepL, lokale Modelle, …) implementieren nur
+    Eigene Backends (weitere lokale Modelle, …) implementieren nur
     ``translate_batch`` und optional ``prepare``.
     """
 
     name = "base"
+    default_batch_chars = 6000  # Zeichen pro Anfrage
+    default_workers = 4  # parallele Anfragen
 
     def __init__(self, source_lang: str, target_lang: str):
         self.source_lang = source_lang

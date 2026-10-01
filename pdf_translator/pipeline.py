@@ -93,16 +93,18 @@ def translate_document(
     document: Document,
     translator: Translator,
     cache: TranslationCache | None = None,
-    batch_chars: int = 6000,
+    batch_chars: int | None = None,
     batch_segments: int = 40,
     context_blocks: int = 2,
-    workers: int = 4,
+    workers: int | None = None,
     retries: int = 1,
     progress: ProgressCallback | None = None,
 ) -> tuple[int, list[str]]:
     """Füllt ``block.translation`` für alle Blöcke. Gibt (aus Cache, Warnungen) zurück."""
     progress = progress or (lambda phase, frac: None)
     cache = cache or TranslationCache(None)
+    batch_chars = batch_chars or translator.default_batch_chars
+    workers = workers or translator.default_workers
     ns = translator.cache_key()
     blocks = document.blocks
 

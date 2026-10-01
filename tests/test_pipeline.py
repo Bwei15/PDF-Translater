@@ -1,4 +1,5 @@
 import json
+import re
 import os
 import sys
 from types import SimpleNamespace
@@ -13,7 +14,9 @@ from make_sample import make_sample  # noqa: E402
 from pdf_translator import extract_document, get_translator, translate_pdf  # noqa: E402
 from pdf_translator.markup import check_translation, is_well_formed  # noqa: E402
 from pdf_translator.translators.base import BatchRequest, Translator  # noqa: E402
-from pdf_translator.translators.claude import ClaudeTranslator  # noqa: E402
+from pdf_translator.translators.argos import ArgosTranslator  # noqa: E402
+from pdf_translator.translators.base import Segment  # noqa: E402
+from pdf_translator.translators.ollama import OllamaTranslator  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -85,31 +88,77 @@ def test_retry_with_feedback(sample, tmp_path):
     assert t.calls[1].feedback  # Probleme werden an das Modell zurückgemeldet
 
 
-def test_claude_request_shape():
-    """Prüft den API-Aufruf mit einem Fake-Client (ohne Netzwerk)."""
-    seen = {}
+class FakeResponse:
+    def __init__(self, body):
+        self.body = json.dumps(body).encode()
 
-    class FakeStream:
-        def __init__(self, **kw):
-            seen.update(kw)
+    def read(self):
+        return self.body
 
-        def __enter__(self):
-            return self
+    def __enter__(self):
+        return self
 
-        def __exit__(self, *a):
-            return False
+    def __exit__(self, *a):
+        return False
 
-        def get_final_message(self):
-            payload = json.loads(seen["messages"][0]["content"].split("\n\n", 1)[1])
-            out = {"translations": [{"id": s["id"], "text": "Hallo <b>Welt</b>"} for s in payload["segments"]]}
-            return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=json.dumps(out))])
 
-    client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(stream=lambda **kw: FakeStream(**kw))))
-    t = ClaudeTranslator("English", "German", client=client, use_glossary=False)
-    from pdf_translator.translators.base import Segment
+def test_ollama_request_shape(monkeypatch):
+    """Prüft die Anfragen an Ollama mit einem simulierten lokalen Server."""
+    sent = []
 
+    def fake_urlopen(req, timeout):
+        sent.append((req.full_url, json.loads(req.data) if req.data else None))
+        if req.full_url.endswith("/api/tags"):
+            return FakeResponse({"models": [{"name": "gemma3:12b"}]})
+        body = sent[-1][1]
+        if "terms" in body["format"]["properties"]:
+            content = {"domain": "NLP", "terms": [{"source": "layout", "target": "Layout"}]}
+        else:
+            payload = json.loads(body["messages"][1]["content"].split("\n\n", 1)[1])
+            content = {"translations": [{"id": s["id"], "text": "Hallo <b>Welt</b>"} for s in payload["segments"]]}
+        return FakeResponse({"message": {"role": "assistant", "content": json.dumps(content)}})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    t = OllamaTranslator("English", "German")
+    t.prepare("Some document about layout.")
+    assert t.glossary == [{"source": "layout", "target": "Layout"}]
     res = t.translate_batch(BatchRequest([Segment("a", "Hello <b>world</b>")], ["prev"], ["next"]))
     assert res == {"a": "Hallo <b>Welt</b>"}
-    assert seen["model"] == "claude-opus-5-5"
-    assert seen["output_config"]["format"]["type"] == "json_schema"
-    assert seen["fallbacks"] == "default"
+    url, body = sent[-1]
+    assert url == "http://localhost:11434/api/chat"
+    assert body["model"] == "gemma3:12b" and body["stream"] is False
+    assert body["options"]["temperature"] == 0
+    assert "layout → Layout" in body["messages"][0]["content"]
+
+
+def test_ollama_missing_model(monkeypatch):
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: FakeResponse({"models": []}))
+    with pytest.raises(RuntimeError, match="ollama pull gemma3:12b"):
+        OllamaTranslator("English", "German").prepare("x")
+
+
+class FakeArgosModel:
+    """Simuliert ein Argos-Sprachpaket: übersetzt ein paar Wörter, Rest bleibt."""
+
+    WORDS = {"Hello": "Hallo", "world": "Welt", "where": "wobei", "is": "ist", "the": "die", "input": "Eingabe"}
+
+    def __init__(self, drop_placeholders=False):
+        self.drop = drop_placeholders
+
+    def translate(self, text):
+        if self.drop:
+            text = re.sub(r"QX\d+Z", "", text)
+        return " ".join(self.WORDS.get(w, w) for w in text.split(" "))
+
+
+def test_argos_keeps_formulas_and_wrappers():
+    t = ArgosTranslator("English", "German")
+    t._translation = FakeArgosModel()
+    assert t.translate_segment("<b>Hello world</b>") == "<b>Hallo Welt</b>"
+    assert t.translate_segment("where <m>x</m> is the input<sup>1</sup>") == "wobei <m>x</m> ist die Eingabe<sup>1</sup>"
+    assert t.translate_segment("Hello &amp; world") == "Hallo &amp; Welt"
+    # Verliert das Modell die Platzhalter, wird stückweise übersetzt – Formel bleibt erhalten.
+    t._translation = FakeArgosModel(drop_placeholders=True)
+    out = t.translate_segment("where <m>x</m> is the input")
+    assert "<m>x</m>" in out and out.startswith("wobei")
+    assert check_translation("where <m>x</m> is the input", out) == []

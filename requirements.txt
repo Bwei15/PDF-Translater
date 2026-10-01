@@ -1,4 +1,5 @@
 pymupdf>=1.25
-anthropic>=1.0
 flask>=3.0
 pytest>=8.0
+# Optional, nur für das Backend "argos" (leichte Offline-Übersetzung):
+# argostranslate>=1.9

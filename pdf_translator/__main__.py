@@ -9,7 +9,7 @@ import sys
 
 from . import lang_suffix
 from .pipeline import translate_pdf
-from .translators import get_translator
+from .translators import BACKENDS, get_translator
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -18,14 +18,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-o", "--output", help="Ausgabe-PDF (Standard: <name>.<ziel>.pdf)")
     p.add_argument("-s", "--source", default="English", help="Ausgangssprache (Standard: English)")
     p.add_argument("-t", "--target", default="German", help="Zielsprache (Standard: German)")
-    p.add_argument("-b", "--backend", default="claude", choices=["claude", "pseudo"],
-                   help="Übersetzungs-Backend ('pseudo' = Offline-Test ohne API)")
-    p.add_argument("--model", default=None, help="Claude-Modell (Standard: claude-opus-5-5)")
-    p.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"],
-                   help="Gründlichkeit des Modells (Standard: high)")
+    p.add_argument("-b", "--backend", default="ollama", choices=list(BACKENDS),
+                   help="ollama = lokales Sprachmodell (Standard, beste Qualität), "
+                        "argos = leichte Offline-Übersetzung, pseudo = Layout-Test")
+    p.add_argument("-m", "--model", default=None,
+                   help="Ollama-Modell (Standard: gemma3:12b; schwächere PCs: gemma3:4b, starke: gemma3:27b)")
+    p.add_argument("--ollama-url", default=None, help="Adresse des Ollama-Servers (Standard: http://localhost:11434)")
     p.add_argument("--no-glossary", action="store_true", help="Kein Fachbegriff-Glossar vorab erstellen")
-    p.add_argument("--workers", type=int, default=4, help="Parallele API-Anfragen (Standard: 4)")
-    p.add_argument("--batch-chars", type=int, default=6000, help="Zeichen pro Anfrage (Standard: 6000)")
+    p.add_argument("--workers", type=int, default=None, help="Parallele Anfragen (Standard je nach Backend)")
+    p.add_argument("--batch-chars", type=int, default=None, help="Zeichen pro Anfrage (Standard je nach Backend)")
     p.add_argument("--cache", default=None, help="Cache-Datei (Standard: <name>.cache.sqlite neben der Eingabe)")
     p.add_argument("--font", nargs="+", metavar="ART=DATEI",
                    help="Eigene Schrift, z. B. regular=lmroman10-regular.otf bold=lmroman10-bold.otf "
@@ -41,11 +42,11 @@ def main(argv: list[str] | None = None) -> int:
     fonts = dict(f.split("=", 1) for f in args.font) if args.font else None
 
     kwargs = {}
-    if args.backend == "claude":
+    if args.backend == "ollama":
         if args.model:
             kwargs["model"] = args.model
-        if args.effort:
-            kwargs["effort"] = args.effort
+        if args.ollama_url:
+            kwargs["url"] = args.ollama_url
         kwargs["use_glossary"] = not args.no_glossary
     translator = get_translator(args.backend, args.source, args.target, **kwargs)
 
@@ -57,10 +58,14 @@ def main(argv: list[str] | None = None) -> int:
             last["phase"] = phase
         print(f"\r{phase}: {frac:5.0%}", end="", file=sys.stderr, flush=True)
 
-    result = translate_pdf(
-        args.input, output, translator, cache_path=cache, fonts=fonts, progress=progress,
-        workers=args.workers, batch_chars=args.batch_chars,
-    )
+    try:
+        result = translate_pdf(
+            args.input, output, translator, cache_path=cache, fonts=fonts, progress=progress,
+            workers=args.workers, batch_chars=args.batch_chars,
+        )
+    except RuntimeError as exc:
+        print(f"\nFehler: {exc}", file=sys.stderr)
+        return 1
     print(file=sys.stderr)
     print(f"Fertig: {result.output_path}")
     print(f"  {result.blocks_translated}/{result.blocks_total} Blöcke übersetzt "
